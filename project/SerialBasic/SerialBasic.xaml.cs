@@ -20,6 +20,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Win32;
 using System.Management;
 using System.Windows.Interop;
+using System.Collections;
 
 namespace VSP
 {
@@ -32,11 +33,16 @@ namespace VSP
         #region 变量定义
 
         #region 内部变量
+        private bool Listening = false;
+        //是否没有执行完invoke相关操作   
+        private bool Closing = false;
         private SerialPort serial = null;
         private StringBuilder builder = new StringBuilder();
         private bool hexadecimalDisplay = false;
         private DispatcherTimer autoSendTimer = new DispatcherTimer();
         private DispatcherTimer autoDetectionTimer = new DispatcherTimer();
+        private Queue sendQueue = new Queue();
+        private Thread threadSendQueue;
         static UInt32 receiveBytesCount = 0;
         static UInt32 sendBytesCount = 0;
         //接收数据
@@ -49,15 +55,19 @@ namespace VSP
         {
             InitializeComponent();
             serial = new SerialPort();
-            serial.Encoding = Encoding.Default;       
-            serial.DataReceived += new SerialDataReceivedEventHandler(ReceiveData);
+            serial.Encoding = Encoding.Default;
+            serial.DataReceived += ReceiveData;
             serial.ReadBufferSize = 4096;
             serial.ReceivedBytesThreshold = 1;
-
-            receiveColorCheckBox_Config();
+            serial.ReadTimeout = 20;
+            serial.NewLine = "\n";
+          
             readUserData();
-                   
+            receiveColorCheckBox_Config();
+
             search_serial();  //通过WMI获取COM端口 
+            threadSendQueue = new Thread(SendQueueTask);
+            threadSendQueue.Start();
 
             //添加设备变化通知
             MainWindowMonitor.DeviceChangedEvent += SerialUpdate;
@@ -204,10 +214,11 @@ namespace VSP
             stopBitsCombobox.IsEnabled = state;
         }
 
-        private void Open_Port()
+        private bool Open_Port()
         {
             try
             {
+                sendQueue.Clear();
                 //配置串口
                 serial.PortName = portNamesCombobox.Text.Substring(0, portNamesCombobox.Text.IndexOf(":"));
                 serial.BaudRate = Convert.ToInt32(baudRateCombobox.Text);
@@ -230,25 +241,31 @@ namespace VSP
 
                 //使能发送面板
                 // sendControlBorder.IsEnabled = true;
-
+                return true;
 
             }
             catch (Exception ex)
             {
                 ex.ToString();
-                //statusTextBlock.Text = ex.Message;
-                statusTextBlock.Text = "串口打开失败";
+                statusTextBlock.Text = ex.Message;
+                //statusTextBlock.Text = "串口打开失败";
+                return false;
             }
         }
         private void Close_Port()
         {
             try
             {
-                serial.Close();
-
                 //关闭定时器
                 autoSendTimer.Stop();
                 autoSendCheckBox.IsChecked = false;
+                sendQueue.Clear();
+                //serial.DiscardOutBuffer();//清发送缓存
+                //serial.DiscardInBuffer();//清接收缓存
+                Closing = true;
+                while (Listening) { Application.Current.Dispatcher.Invoke(DispatcherPriority.Background, new ThreadStart(delegate { })); };
+                serial.Close();              
+                Closing = false;
                 //使能串口配置面板
                 serialSettingControlState(true);
 
@@ -289,45 +306,51 @@ namespace VSP
         #endregion
 
         #region 接收显示窗口
-        
-       // private string receiveData;
-        //private void ReceiveData(object sender, System.IO.Ports.SerialDataReceivedEventArgs e)
-        //{
-        //    receiveData = serial.ReadExisting();
-        //    Dispatcher.Invoke(DispatcherPriority.Send, new UpdateUiTextDelegate(ShowData), receiveData);
-        //}
-
 
         private void ReceiveData(object sender, SerialDataReceivedEventArgs e)
         {
+            if (Closing) return;
+            Listening = true;
             if (hexadecimalDisplay == true)
             {
                 int n = serial.BytesToRead;//先记录下来，避免某种原因，人为的原因，操作几次之间时间长，缓存不一致 
-                byte[] buf = new byte[n];//声明一个临时数组存储当前来的串口数据
-                receiveBytesCount += (UInt32)n;//增加接收计数
+                byte[] buf = new byte[n];//声明一个临时数组存储当前来的串口数据               
                 serial.Read(buf, 0, n);//读取缓冲数据
-                Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() =>
-                {                
+                receiveBytesCount += (UInt32)n;//增加接收计数                               
+                builder.Clear();//清除字符串构造器的内容
+                //依次的拼接出16进制字符串  
+                foreach (byte b in buf)
+                {
+                    builder.Append(b.ToString("X2") + " ");
+                }
+                string hexString = builder.ToString();
+                Dispatcher.Invoke(() =>
+                {
                     if (stopShowingButton.IsChecked == false) //没有关闭数据显示
                     {
-                        builder.Clear();//清除字符串构造器的内容
-                        //依次的拼接出16进制字符串  
-                        foreach (byte b in buf)
-                        {
-                            builder.Append(b.ToString("X2") + " ");
-                        }              
-                        receiveTextBox.AppendText(builder.ToString());
+                        receiveTextBox.AppendText(hexString);
                     }
-                    //修改接收计数  
                     statusReceiveByteTextBlock.Text = receiveBytesCount.ToString();
-                }));
+                });
+
             }
             else
             {
+                bool isShowTime = false;
+                //Dispatcher.Invoke(() =>
+                //{
+                //    isShowTime = (bool)showTimeCheckBox.IsChecked;
+                //});
                 string receiveData = serial.ReadExisting();
+                //try
+                //{
+                //    if (isShowTime) receiveData = DateTime.Now.ToLocalTime().ToString() + " : " +serial.ReadLine() + "\n";
+                //    else receiveData = serial.ReadExisting();
+                //}
+                //catch { };
                 //更新接收字节数
                 receiveBytesCount += (UInt32)receiveData.Length;
-                Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() =>
+                Dispatcher.Invoke(() =>
                 {
                     //没有关闭数据显示
                     if (stopShowingButton.IsChecked == false)
@@ -335,8 +358,9 @@ namespace VSP
                         receiveTextBox.AppendText(receiveData);
                     }
                     statusReceiveByteTextBlock.Text = receiveBytesCount.ToString();
-                }));
+                });
             }
+            Listening = false;
         }
         public bool IsVerticalScrollBarAtButtom
         {
@@ -385,20 +409,20 @@ namespace VSP
         //设置滚动条显示到末尾
         private void ReceiveTextBox_TextChanged(object sender, TextChangedEventArgs e)
         {
-            const int MaxLength = 100000;
+            const int MaxLength = 50000;
             try
             {
                 if (IsVerticalScrollBarAtButtom == true) receiveTextBox.ScrollToEnd();
-                if (receiveTextBox.Text.Length > MaxLength)
-                {           
-                    receiveTextBox.Text = receiveTextBox.Text.Substring(MaxLength/2, receiveTextBox.Text.Length - MaxLength/2);
-                }
+                //if (receiveTextBox.Text.Length > MaxLength)
+                //{
+                //    receiveTextBox.Text = receiveTextBox.Text.Substring(MaxLength / 10, receiveTextBox.Text.Length - MaxLength / 10);
+                //}
             }
             catch
-            {
-                ;
+            {             
             }
         }
+
 
         #endregion
 
@@ -417,9 +441,123 @@ namespace VSP
         #endregion
 
         #region 发送控制面板
+
+        private struct SendSetStr//发送数据线程传递参数的结构体格式
+        {
+            public string SendSetData;//发送的数据
+            public bool SendAscill;//发送模式
+        }
+        private void SendQueueTask()
+        {
+            while (true)
+            {
+                if (sendQueue.Count <= 0)
+                {
+                    Thread.Sleep(100);
+                    continue;
+                }
+                
+                SendSetStr SendSet = (SendSetStr)sendQueue.Dequeue();
+                string sendData = SendSet.SendSetData;
+                if (SendSet.SendAscill)
+                {
+                    try
+                    {
+                        serial.Write(sendData);
+                        Dispatcher.Invoke(() =>
+                        {
+                            if (showSendCheckBox.IsChecked == true)
+                            {
+                                receiveTextBox.AppendText(sendData);
+                            }
+                            //更新发送数据计数
+                            sendBytesCount += (UInt32)sendData.Length;
+                            statusSendByteTextBlock.Text = sendBytesCount.ToString();
+                            statusTextBlock.Text = "发送成功";
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        Dispatcher.Invoke(() =>
+                        {
+                            autoSendCheckBox.IsChecked = false;//关闭自动发送
+                            statusTextBlock.Text = ex.Message;
+                        });
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        sendData = sendData.Replace(" ", "");
+                        sendData = sendData.Replace("0X", "");
+                        sendData = sendData.Replace("0x", "");
+                        sendData = sendData.Replace("\r", "");
+                        sendData = sendData.Replace("\n", "");
+                        sendData = sendData.Replace("\t", "");
+
+                        byte[] sendByte = new byte[sendData.Length / 2 + sendData.Length % 2];
+                        for (int i = 0; i < (sendData.Length - sendData.Length % 2) / 2; i++)//转换偶数个
+                        {
+                            sendByte[i] = Convert.ToByte(sendData.Substring(i * 2, 2), 16);    //转换               
+                        }
+                        if (sendData.Length % 2 != 0)//单独处理最后一个字符    
+                        {
+                            sendByte[sendByte.Length - 1] = Convert.ToByte(sendData.Substring(sendData.Length - 1, 1), 16);
+                        }
+
+                        try
+                        {
+                            serial.Write(sendByte, 0, sendByte.Length);
+                            //更新发送数据计数
+                            sendBytesCount += (UInt32)sendByte.Length;
+                            Dispatcher.Invoke(() =>
+                            {
+                                statusSendByteTextBlock.Text = sendBytesCount.ToString();
+                                if (showSendCheckBox.IsChecked == true) receiveTextBox.AppendText("\n" + sendData + "\n");
+                                statusTextBlock.Text = "发送成功";
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            Dispatcher.Invoke(() =>
+                            {
+                                statusTextBlock.Text = ex.Message;
+                                autoSendCheckBox.IsChecked = false;//关闭自动发送
+                            });
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        e.ToString();
+                        Dispatcher.Invoke(() =>
+                        {
+                            autoSendCheckBox.IsChecked = false;//关闭自动发送
+                            statusTextBlock.Text = "请输入16进制";
+                        });
+                    }
+                }
+
+            }
+        }
         private void SerialPortSendAsString(string sendData)
         {
-
+            if (serial.IsOpen == false)
+            {
+                //statusTextBlock.Text = "请先打开串口";
+                //return;
+                if (Open_Port() == false) return;
+            }
+            if (sendQueue.Count > 10)
+            {
+                statusTextBlock.Text = "发送队列已满";
+                return;
+            }
+            SendSetStr SendSet = new SendSetStr();
+            SendSet.SendSetData = sendData;
+            SendSet.SendAscill = true;
+            sendQueue.Enqueue(SendSet);
+            return;
             try
             {
                 serial.Write(sendData);
@@ -437,12 +575,26 @@ namespace VSP
                 autoSendCheckBox.IsChecked = false;//关闭自动发送
                 statusTextBlock.Text = ex.Message;
             }
-
         }
         //发送数据
         private void SerialPortSendAsHex(string sendData)
         {
-
+            if (serial.IsOpen == false)
+            {
+                //statusTextBlock.Text = "请先打开串口";
+                //return;
+                if (Open_Port() == false) return;
+            }
+            if (sendQueue.Count > 10)
+            {
+                statusTextBlock.Text = "发送队列已满";
+                return;
+            }
+            SendSetStr SendSet = new SendSetStr();
+            SendSet.SendSetData = sendData;
+            SendSet.SendAscill = false;
+            sendQueue.Enqueue(SendSet);
+            return;
             try
             {
                 sendData = sendData.Replace(" ", "");
@@ -505,7 +657,7 @@ namespace VSP
         //手动发送数据
         private void SendButton_Click(object sender, RoutedEventArgs e)
         {
-            if(sendTextBox.Text != string.Empty) SerialPortSend(sendTextBox.Text);
+            if (sendTextBox.Text != string.Empty) SerialPortSend(sendTextBox.Text);
             else statusTextBlock.Text = "发送区为空";
 
         }
@@ -567,14 +719,9 @@ namespace VSP
 
         private void SendTextBox_PreviewTextInput(object sender, TextCompositionEventArgs e)
         {
-            if (hexadecimalSendCheckBox.IsChecked == true)
-            {
-                e.Handled = false;
-            }
-            else
-            {
-                e.Handled = false;
-            }
+
+             e.Handled = false;
+            
         }
 
         private void FileOpen(object sender, ExecutedRoutedEventArgs e)
@@ -602,9 +749,10 @@ namespace VSP
             {
                 SaveFileDialog saveFile = new SaveFileDialog();
                 saveFile.Filter = "TXT文本|*.txt";
+                saveFile.FileName = "receiveText";
                 if (saveFile.ShowDialog() == true)
                 {
-                    File.AppendAllText(saveFile.FileName, "\r\n-----------" + DateTime.Now.ToString() + "-----------r\n");
+                    File.AppendAllText(saveFile.FileName, "\r\n-----------" + DateTime.Now.ToString() + "-----------\r\n");
                     File.AppendAllText(saveFile.FileName, receiveTextBox.Text);
                     statusTextBlock.Text = "保存成功！";
                 }

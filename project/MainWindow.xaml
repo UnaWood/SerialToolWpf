@@ -3,6 +3,6 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:MultiFunction="clr-namespace:VSP"
      
-        Title="VSP调试助手" Name="softWareMainWindow" Width="1000" Height="481.4" MinWidth="800"  MinHeight="540" WindowStartupLocation="CenterScreen">
+        Title="VSP调试助手V2.2.1" Name="softWareMainWindow" Width="1000" Height="481.4" MinWidth="800"  MinHeight="540" WindowStartupLocation="CenterScreen" Icon="ooopic_1514345796.ico">
     <MultiFunction:SerialBasic Loaded="SerialBasic_Loaded"  Margin="0,0,3.6,0.4" />
 </Window>

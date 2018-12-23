@@ -28,6 +28,7 @@ namespace VSP
         {
             InitializeComponent();
             this.Closing += Window_Closing;
+            this.Closed += Window_Closed;
         }
 
         private void SerialBasic_Loaded(object sender, RoutedEventArgs e)
@@ -38,6 +39,11 @@ namespace VSP
                 hwndSource.AddHook(new HwndSourceHook(DeveiceChanged));  //挂钩
             }
 
+        }
+        private void Window_Closed(object sender, EventArgs e)
+        {
+            Application.Current.Shutdown();//先停止线程,然后终止进程.
+            Environment.Exit(0);
         }
         private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {

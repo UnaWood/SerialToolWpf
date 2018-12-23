@@ -87,7 +87,10 @@ namespace VSP
                         {
                             string com = hardInfo.Properties["Name"].Value.ToString();
                             string[] strcom = com.Split(new char[2] { '(', ')' });
-                            Comstrs.Add(strcom[1] + ":" + strcom[0]);
+                            //Comstrs.Add(strcom[1] + ":" + strcom[0]);
+                            int startIndex = com.IndexOf("COM");
+                            string comName = com.Substring(startIndex, com.Length - startIndex - 1);
+                            Comstrs.Add(comName + ":" + com.Replace("("+ comName+")", ""));
                             //Comstrs.Add(hardInfo.Properties[propKey].Value.ToString());
                         }
                     }
